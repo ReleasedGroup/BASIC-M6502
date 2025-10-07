@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Text;
 using MicrosoftBasicApp.Parsing;
 using MicrosoftBasicApp.Runtime;
 using Xunit;
@@ -114,6 +116,22 @@ public class BasicInterpreterTests
         Assert.Contains("10", io.GetBuffer());
     }
 
+    [Fact]
+    public void InputPrompt_PrintsQuestionMark()
+    {
+        var program = BuildProgram(
+            "10 INPUT \"COMMAND\";A$",
+            "20 PRINT A$",
+            "30 END");
+
+        var io = new BufferedBasicIO(new[] { "HELLO" });
+        Execute(program, io);
+
+        var output = io.GetBuffer();
+        Assert.Contains("COMMAND? ", output, StringComparison.Ordinal);
+        Assert.Contains("HELLO", output, StringComparison.Ordinal);
+    }
+
     private static BasicProgram BuildProgram(params string[] lines)
     {
         var program = new BasicProgram();
@@ -194,7 +212,7 @@ public class BasicInterpreterTests
         var scriptPath = Path.Combine(repoRoot, "STARTREK.BAS");
         var program = BuildProgramFromFile(scriptPath);
 
-        var io = new BufferedBasicIO(new[] { "XXX" });
+        var io = new BufferedBasicIO(new[] { "XXX", string.Empty });
         var runtime = new BasicRuntime(program.Compile(), io);
         runtime.ClearVariables();
         runtime.Execute();
@@ -202,6 +220,92 @@ public class BasicInterpreterTests
         var output = io.GetBuffer();
         Assert.Contains("THE USS ENTERPRISE", output, StringComparison.Ordinal);
         Assert.Contains("YOUR ORDERS", output, StringComparison.Ordinal);
+        Assert.Contains("COMMAND? ", output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StartrekScript_AllowsMultipleCommands()
+    {
+        var repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+        var scriptPath = Path.Combine(repoRoot, "STARTREK.BAS");
+        var program = BuildProgramFromFile(scriptPath);
+
+        var inputs = new[] { "SRS", "XXX", string.Empty };
+        var io = new InstrumentedBasicIO(inputs);
+        var runtime = new BasicRuntime(program.Compile(), io);
+        runtime.ClearVariables();
+        runtime.Execute();
+
+        var output = io.GetBuffer();
+        var promptCount = CountOccurrences(output, "COMMAND? ");
+        Assert.True(promptCount >= 2, $"Expected at least two command prompts but saw {promptCount}.");
+        Assert.Equal(inputs.Length, io.ConsumedInputs);
+        Assert.Contains("LET HIM STEP FORWARD", output, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void LoadCommand_LoadsProgramFromFile()
+    {
+        var tempPath = Path.Combine(Path.GetTempPath(), $"basic-load-{Guid.NewGuid():N}.bas");
+        File.WriteAllLines(tempPath, new[]
+        {
+            "10 PRINT \"HELLO\"",
+            "20 END"
+        });
+
+        try
+        {
+            var io = new BufferedBasicIO();
+            var interpreter = new BasicInterpreter(io);
+
+            interpreter.ProcessCommand($"LOAD \"{tempPath}\"");
+
+            var programText = interpreter.DumpProgram();
+            Assert.Contains("10 PRINT \"HELLO\"", programText, StringComparison.Ordinal);
+            Assert.Contains("20 END", programText, StringComparison.Ordinal);
+            Assert.Contains("READY.", io.GetBuffer(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+            {
+                File.Delete(tempPath);
+            }
+        }
+    }
+
+    [Fact]
+    public void SaveCommand_WritesProgramToFile()
+    {
+        var tempPath = Path.Combine(Path.GetTempPath(), $"basic-save-{Guid.NewGuid():N}.bas");
+
+        try
+        {
+            var io = new BufferedBasicIO();
+            var interpreter = new BasicInterpreter(io);
+
+            interpreter.ProcessCommand("10 PRINT \"HI\"");
+            interpreter.ProcessCommand("20 END");
+
+            interpreter.ProcessCommand($"SAVE \"{tempPath}\"");
+            Assert.True(File.Exists(tempPath));
+            var saved = File.ReadAllText(tempPath);
+            Assert.Contains("10 PRINT \"HI\"", saved, StringComparison.Ordinal);
+            Assert.Contains("20 END", saved, StringComparison.Ordinal);
+
+            var reloadIo = new BufferedBasicIO();
+            var reloadInterpreter = new BasicInterpreter(reloadIo);
+            reloadInterpreter.ProcessCommand($"LOAD \"{tempPath}\"");
+            reloadInterpreter.ProcessCommand("SAVE");
+            Assert.Contains("READY.", reloadIo.GetBuffer(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+            {
+                File.Delete(tempPath);
+            }
+        }
     }
 
     private static BasicProgram BuildProgramFromFile(string path)
@@ -230,6 +334,60 @@ public class BasicInterpreterTests
         }
 
         return program;
+    }
+
+    private static int CountOccurrences(string text, string value)
+    {
+        var count = 0;
+        var index = 0;
+        while (true)
+        {
+            index = text.IndexOf(value, index, StringComparison.Ordinal);
+            if (index < 0)
+            {
+                break;
+            }
+
+            count++;
+            index += value.Length;
+        }
+
+        return count;
+    }
+
+    private sealed class InstrumentedBasicIO : IBasicIO
+    {
+        private readonly Queue<string> _inputs;
+        private readonly StringBuilder _buffer = new();
+        private readonly List<string> _lines = new();
+
+        public InstrumentedBasicIO(IEnumerable<string> inputs)
+        {
+            _inputs = new Queue<string>(inputs);
+        }
+
+        public int ConsumedInputs { get; private set; }
+
+        public string? ReadLine()
+        {
+            ConsumedInputs++;
+            return _inputs.Count > 0 ? _inputs.Dequeue() : null;
+        }
+
+        public void Write(string text)
+        {
+            _buffer.Append(text);
+        }
+
+        public void WriteLine(string text = "")
+        {
+            _buffer.AppendLine(text);
+            _lines.Add(text);
+        }
+
+        public string GetBuffer() => _buffer.ToString();
+
+        public IReadOnlyList<string> Lines => _lines;
     }
 
     [Fact]

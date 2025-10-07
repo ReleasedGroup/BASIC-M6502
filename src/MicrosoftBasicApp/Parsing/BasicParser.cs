@@ -376,12 +376,26 @@ internal sealed class BasicParser
         var elseTokens = new List<Token>();
         var collectingElse = false;
 
-        while (!IsEndOfStatement())
+        while (!Check(TokenKind.End))
         {
             var token = Advance();
             if (token.Kind == TokenKind.Keyword && token.Text == "ELSE")
             {
                 collectingElse = true;
+                continue;
+            }
+
+            if (token.Kind == TokenKind.Separator && token.Text == ":")
+            {
+                if (collectingElse)
+                {
+                    elseTokens.Add(token);
+                }
+                else
+                {
+                    thenTokens.Add(token);
+                }
+
                 continue;
             }
 
@@ -393,11 +407,6 @@ internal sealed class BasicParser
             {
                 thenTokens.Add(token);
             }
-        }
-
-        if (thenTokens.Count == 0)
-        {
-            throw new BasicSyntaxException("Expected statement or line number after THEN");
         }
 
         var thenStatement = ParseConditionalBranch(thenTokens, "THEN");
