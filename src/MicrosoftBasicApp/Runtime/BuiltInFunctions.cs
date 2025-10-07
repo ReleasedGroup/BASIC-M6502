@@ -7,7 +7,7 @@ internal static class BuiltInFunctions
     private static readonly HashSet<string> Functions = new(StringComparer.Ordinal)
     {
         "ABS","ATN","COS","EXP","INT","LOG","RND","SGN","SIN","SQR","TAN","GET",
-        "LEN","LEFT$","RIGHT$","MID$","CHR$","ASC","STR$","VAL"
+        "LEN","LEFT$","RIGHT$","MID$","CHR$","ASC","STR$","VAL","TAB","SPC"
     };
 
     public static bool IsBuiltIn(string name) => Functions.Contains(name);
@@ -36,6 +36,8 @@ internal static class BuiltInFunctions
             "ASC" => RequireArgs(name, args, 1, () => InvokeAsc(args[0])),
             "STR$" => RequireArgs(name, args, 1, () => BasicValue.FromString(FormatStr(args[0]))),
             "VAL" => RequireArgs(name, args, 1, () => BasicValue.FromNumber(ParseVal(args[0].AsString()))),
+            "TAB" => RequireArgs(name, args, 1, () => BasicValue.FromString(CreateSpaces(args[0]))),
+            "SPC" => RequireArgs(name, args, 1, () => BasicValue.FromString(CreateSpaces(args[0]))),
             _ => throw new BasicRuntimeException($"Unknown function {name}")
         };
     }
@@ -157,5 +159,11 @@ internal static class BuiltInFunctions
 
         var numeric = new string(builder.ToArray());
         return double.TryParse(numeric, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) ? value : 0d;
+    }
+
+    private static string CreateSpaces(BasicValue value)
+    {
+        var count = Math.Max(0, value.AsInt32());
+        return new string(' ', count);
     }
 }

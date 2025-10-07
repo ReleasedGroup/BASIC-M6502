@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.IO;
+using MicrosoftBasicApp.Parsing;
 using MicrosoftBasicApp.Runtime;
 using Xunit;
 
@@ -186,6 +187,23 @@ public class BasicInterpreterTests
         }
     }
 
+    [Fact]
+    public void StartrekScript_AllowsImmediateResign()
+    {
+        var repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+        var scriptPath = Path.Combine(repoRoot, "STARTREK.BAS");
+        var program = BuildProgramFromFile(scriptPath);
+
+        var io = new BufferedBasicIO(new[] { "XXX" });
+        var runtime = new BasicRuntime(program.Compile(), io);
+        runtime.ClearVariables();
+        runtime.Execute();
+
+        var output = io.GetBuffer();
+        Assert.Contains("THE USS ENTERPRISE", output, StringComparison.Ordinal);
+        Assert.Contains("YOUR ORDERS", output, StringComparison.Ordinal);
+    }
+
     private static BasicProgram BuildProgramFromFile(string path)
     {
         var program = new BasicProgram();
@@ -213,4 +231,14 @@ public class BasicInterpreterTests
 
         return program;
     }
+
+    [Fact]
+    public void Parser_HandlesOpenStatementWithoutSpaces()
+    {
+        const string line = "OPEN \"TEST.DAT\" FOR OUTPUT AS #1";
+        var parser = new BasicParser();
+        var statements = parser.ParseLine(line);
+        Assert.Single(statements);
+    }
+
 }

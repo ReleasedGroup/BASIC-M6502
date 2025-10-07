@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Linq;
 using System.Text;
 
 using MicrosoftBasicApp.Runtime;
@@ -13,6 +14,14 @@ internal sealed class Tokenizer
         "DIM","INPUT","CLEAR","END","STOP","REM","NEW","RUN","AND","OR","NOT","DATA","READ","RESTORE","RANDOMIZE",
         "DEF","ON","OPEN","CLOSE","AS","OUTPUT","APPEND"
     };
+
+    private static readonly string[] OrderedKeywords = Keywords.OrderByDescending(k => k.Length).ToArray();
+    private static readonly HashSet<string> KeywordsAllowingAdjacency = new(StringComparer.Ordinal)
+    {
+        "FOR","NEXT","TO","STEP","THEN","GOTO","GOSUB","IF","ON","DIM","DATA","READ","RESTORE",
+        "RANDOMIZE","RETURN","END","STOP","LET","ELSE","PRINT","INPUT","RUN","NEW","CLEAR","REM","DEF","OR","AND","NOT"
+    };
+    private static readonly string[] EmbeddedKeywords = { "THEN", "GOTO", "GOSUB" };
 
     private readonly string _source;
     private readonly List<Token> _tokens = new();
@@ -64,23 +73,20 @@ internal sealed class Tokenizer
 
             if (char.IsLetter(c) || c == '_')
             {
+                if (TryReadKeyword(out var keyword))
+                {
+                    _tokens.Add(new Token(TokenKind.Keyword, keyword));
+                    if (keyword == "REM")
+                    {
+                        SkipToLineEnd();
+                        break;
+                    }
+
+                    continue;
+                }
+
                 var word = ReadWord();
-                if (word == "REM")
-                {
-                    _tokens.Add(new Token(TokenKind.Keyword, "REM"));
-                    SkipToLineEnd();
-                    break;
-                }
-
-                if (Keywords.Contains(word))
-                {
-                    _tokens.Add(new Token(TokenKind.Keyword, word));
-                }
-                else
-                {
-                    _tokens.Add(new Token(TokenKind.Identifier, word));
-                }
-
+                EmitWordTokens(word);
                 continue;
             }
 
@@ -193,6 +199,94 @@ internal sealed class Tokenizer
         }
 
         return new Token(TokenKind.String, builder.ToString());
+    }
+
+    private bool TryReadKeyword(out string keyword)
+    {
+        foreach (var candidate in OrderedKeywords)
+        {
+            if (MatchesKeyword(candidate))
+            {
+                keyword = candidate;
+                _position += candidate.Length;
+                return true;
+            }
+        }
+
+        keyword = string.Empty;
+        return false;
+    }
+
+    private bool MatchesKeyword(string keyword)
+    {
+        if (_position + keyword.Length > _source.Length)
+        {
+            return false;
+        }
+
+        if (!MemoryExtensions.Equals(_source.AsSpan(_position, keyword.Length), keyword.AsSpan(), StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var next = Peek(keyword.Length);
+        if (next == '\0')
+        {
+            return true;
+        }
+
+        if (char.IsLetterOrDigit(next) || next == '_' || next == '$')
+        {
+            return KeywordsAllowingAdjacency.Contains(keyword);
+        }
+
+        return true;
+    }
+
+    private void EmitWordTokens(string word)
+    {
+        if (string.IsNullOrEmpty(word))
+        {
+            return;
+        }
+
+        if (Keywords.Contains(word))
+        {
+            _tokens.Add(new Token(TokenKind.Keyword, word));
+            return;
+        }
+
+        foreach (var keyword in EmbeddedKeywords)
+        {
+            var index = word.IndexOf(keyword, StringComparison.Ordinal);
+            if (index > 0 && index + keyword.Length <= word.Length)
+            {
+                var prefix = word[..index];
+                if (prefix.Length > 0)
+                {
+                    EmitWordTokens(prefix);
+                }
+
+                _tokens.Add(new Token(TokenKind.Keyword, keyword));
+
+                var suffix = word[(index + keyword.Length)..];
+                if (suffix.Length > 0)
+                {
+                    EmitWordTokens(suffix);
+                }
+
+                return;
+            }
+        }
+
+        if (double.TryParse(word, NumberStyles.Float, CultureInfo.InvariantCulture, out var numericValue))
+        {
+            _tokens.Add(new Token(TokenKind.Number, word, numericValue));
+        }
+        else
+        {
+            _tokens.Add(new Token(TokenKind.Identifier, word));
+        }
     }
 
     private string ReadWord()
