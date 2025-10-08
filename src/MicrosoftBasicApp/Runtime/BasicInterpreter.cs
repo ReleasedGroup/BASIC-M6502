@@ -2,7 +2,11 @@ using MicrosoftBasicApp.Parsing;
 
 namespace MicrosoftBasicApp.Runtime;
 
+using System.Diagnostics;
 using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text;
 
 public sealed class BasicInterpreter
 {
@@ -86,6 +90,12 @@ public sealed class BasicInterpreter
             if (TryMatchCommand(line, "SAVE", out var saveArgs))
             {
                 HandleSave(saveArgs);
+                return true;
+            }
+
+            if (TryMatchCommand(line, "COMPILE", out var compileArgs))
+            {
+                HandleCompile(compileArgs);
                 return true;
             }
 
@@ -302,6 +312,262 @@ public sealed class BasicInterpreter
         {
             throw new BasicRuntimeException(ex.Message);
         }
+    }
+
+    private void HandleCompile(string arguments)
+    {
+        if (_program.IsEmpty)
+        {
+            throw new BasicRuntimeException("No program loaded.");
+        }
+
+        var outputPath = ResolveOutputPath(arguments);
+        var rid = RuntimeInformation.RuntimeIdentifier;
+        if (string.IsNullOrWhiteSpace(rid))
+        {
+            throw new BasicRuntimeException("Unable to determine runtime identifier.");
+        }
+
+        var dotnetExecutable = ResolveDotnetExecutable();
+        var projectPath = FindProjectFile();
+        var tempDirectory = Directory.CreateTempSubdirectory("msbasic-compile");
+
+        try
+        {
+            var programFile = Path.Combine(tempDirectory.FullName, "program.bas");
+            File.WriteAllText(programFile, DumpProgram(), Encoding.UTF8);
+
+            var publishDir = Path.Combine(tempDirectory.FullName, "publish");
+            Directory.CreateDirectory(publishDir);
+
+            var outputLog = new StringBuilder();
+            var errorLog = new StringBuilder();
+
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = dotnetExecutable,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false
+                }
+            };
+
+            var argumentsList = process.StartInfo.ArgumentList;
+            argumentsList.Add("publish");
+            argumentsList.Add(projectPath);
+            argumentsList.Add("-c");
+            argumentsList.Add("Release");
+            argumentsList.Add("-r");
+            argumentsList.Add(rid);
+            argumentsList.Add("-o");
+            argumentsList.Add(publishDir);
+            argumentsList.Add("-p:SelfContained=true");
+            argumentsList.Add("-p:PublishSingleFile=true");
+            argumentsList.Add("-p:PublishAot=true");
+            argumentsList.Add("-p:StripSymbols=true");
+            argumentsList.Add($"-p:CompiledProgramPath={programFile}");
+
+            process.OutputDataReceived += (_, e) =>
+            {
+                if (!string.IsNullOrWhiteSpace(e.Data))
+                {
+                    outputLog.AppendLine(e.Data);
+                }
+            };
+
+            process.ErrorDataReceived += (_, e) =>
+            {
+                if (!string.IsNullOrWhiteSpace(e.Data))
+                {
+                    errorLog.AppendLine(e.Data);
+                }
+            };
+
+            if (!process.Start())
+            {
+                throw new BasicRuntimeException("Failed to start dotnet publish.");
+            }
+
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+            process.WaitForExit();
+
+            if (process.ExitCode != 0)
+            {
+                var details = errorLog.Length > 0 ? errorLog.ToString() : outputLog.ToString();
+                throw new BasicRuntimeException($"Compilation failed.{Environment.NewLine}{details}");
+            }
+
+            var publishedExecutable = LocatePublishedExecutable(publishDir);
+            Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+            File.Copy(publishedExecutable, outputPath, true);
+
+            if (!OperatingSystem.IsWindows())
+            {
+                TryMakeExecutable(outputPath);
+            }
+
+            _io.WriteLine($"OUTPUT: {outputPath}");
+            _io.WriteLine("READY.");
+        }
+        catch (IOException ex)
+        {
+            throw new BasicRuntimeException(ex.Message);
+        }
+        finally
+        {
+            TryDeleteDirectory(tempDirectory.FullName);
+        }
+    }
+
+    private string ResolveOutputPath(string arguments)
+    {
+        var path = string.IsNullOrWhiteSpace(arguments)
+            ? GenerateDefaultOutputPath()
+            : ResolveFilePath(arguments);
+
+        if (OperatingSystem.IsWindows() && string.IsNullOrEmpty(Path.GetExtension(path)))
+        {
+            path += ".exe";
+        }
+
+        return Path.GetFullPath(path);
+    }
+
+    private string GenerateDefaultOutputPath()
+    {
+        string directory;
+        string baseName;
+
+        if (!string.IsNullOrWhiteSpace(_currentProgramPath))
+        {
+            directory = Path.GetDirectoryName(_currentProgramPath) ?? Environment.CurrentDirectory;
+            var fileName = Path.GetFileNameWithoutExtension(_currentProgramPath);
+            baseName = string.IsNullOrWhiteSpace(fileName) ? "compiled-basic" : fileName;
+        }
+        else
+        {
+            directory = Environment.CurrentDirectory;
+            baseName = "compiled-basic";
+        }
+
+        var output = Path.Combine(directory, baseName);
+        if (OperatingSystem.IsWindows())
+        {
+            output += ".exe";
+        }
+
+        return output;
+    }
+
+    private static string LocatePublishedExecutable(string publishDirectory)
+    {
+        var candidates = Directory.EnumerateFiles(publishDirectory, "*", SearchOption.TopDirectoryOnly)
+            .Where(IsExecutablePath)
+            .ToList();
+
+        if (candidates.Count == 0)
+        {
+            throw new BasicRuntimeException("Unable to locate published executable.");
+        }
+
+        var preferred = candidates.FirstOrDefault(path =>
+            string.Equals(Path.GetFileNameWithoutExtension(path), "MicrosoftBasicApp", StringComparison.OrdinalIgnoreCase));
+
+        return preferred ?? candidates.First();
+    }
+
+    private static bool IsExecutablePath(string path)
+    {
+        var name = Path.GetFileName(path);
+        if (string.IsNullOrEmpty(name))
+        {
+            return false;
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            return string.Equals(Path.GetExtension(name), ".exe", StringComparison.OrdinalIgnoreCase);
+        }
+
+        return !name.Contains('.');
+    }
+
+    private static void TryMakeExecutable(string path)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        try
+        {
+            File.SetUnixFileMode(path,
+                UnixFileMode.UserRead | UnixFileMode.UserExecute |
+                UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
+                UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+        }
+        catch (Exception)
+        {
+            // Best effort on platforms that support chmod semantics.
+        }
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, true);
+            }
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private static string ResolveDotnetExecutable()
+    {
+        var hostPath = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH");
+        if (!string.IsNullOrWhiteSpace(hostPath) && File.Exists(hostPath))
+        {
+            return hostPath;
+        }
+
+        var dotnetRoot = Environment.GetEnvironmentVariable("DOTNET_ROOT");
+        if (!string.IsNullOrWhiteSpace(dotnetRoot))
+        {
+            var candidate = Path.Combine(dotnetRoot, OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet");
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return "dotnet";
+    }
+
+    private static string FindProjectFile()
+    {
+        var directory = new DirectoryInfo(Environment.CurrentDirectory);
+        while (directory is not null)
+        {
+            var candidate = Path.Combine(directory.FullName, "src", "MicrosoftBasicApp", "MicrosoftBasicApp.csproj");
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+
+            directory = directory.Parent;
+        }
+
+        throw new BasicRuntimeException("Unable to locate project file for compilation.");
     }
 
     private static string ResolveFilePath(string arguments)
